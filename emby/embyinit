@@ -1,0 +1,733 @@
+#!/bin/sh
+# embyinit
+# Emby Media Server Extension for NAS4Free/XigmaNAS 10.3 and later version.
+# (https://www.xigmanas.com/forums/viewtopic.php?f=71&t=11184)
+# License: BSD2CLAUSE (BSD 2-clause Simplified License).
+# *Emby(c) (Emby Media Server) is a registered trademark of Emby(c), Inc.
+# Debug script.
+#set -x
+
+# Copyright (c) 2018 José Rivera (JoseMR)
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that following conditions are met:
+# 1. Redistributions of source code must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS 'AS IS' AND ANY
+# EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+# WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+# DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE FOR ANY
+# DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+# (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+# LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+# ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+# THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+# Set environment.
+PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin
+
+# Set global variables.
+SCRIPTNAME=$(basename $0)
+CWDIR=$(dirname $(realpath $0))
+PLATFORM=$(uname -m)
+PRODUCT=$(uname -i)
+PRDVERSION=$(uname -r | cut -d '-' -f1 | tr -d '.')
+PRDPLATFORM=$(cat /etc/platform)
+DATE=$(date +"%a %b %d %T %Y")
+APPNAME="Emby Extension"
+PKGCONF="/etc/pkg/FreeBSD.conf"
+WWWPATH="/usr/local/www"
+PKGCACHE="/var/cache/pkg"
+PKGDB="/var/db/pkg"
+EMBYCONF="/conf/emby_config"
+EMBYCONFLINK="/var/etc/embyconf"
+COMPATPATH1="/usr/local/lib/compat"
+COMPATPATH2="/usr/local/lib32/compat"
+COMPATPATH3="/usr/local/libdata/ldconfig"
+COMPATPATH4="/usr/local/libdata/ldconfig32"
+USRLOCALPATH="/usr/local/share"
+EMBYPATH="${USRLOCALPATH}/embymediaserver"
+EMBYRCD="/usr/local/etc/rc.d/embymediaserver"
+EMBYPID="/var/run/emby/emby.pid"
+SUPPORTPATH="${CWDIR}/embydata"
+RCDPATH="/usr/local/etc/rc.d"
+CONFIG="/cf/conf/config.xml"
+RCCONF="/etc/rc.conf"
+FULLPRDNAME="Emby Media Server"
+EMBYLOGFILE="${CWDIR}/log/emby_ext.log"
+PRDNAME="embymediaserver"
+CMDNAME=${PRDNAME}
+CMDFILE="Emby_Media_Server"
+BRANCH="master"
+GITURL="https://github.com/JRGTH/nas4free-emby-extension/archive/${BRANCH}.zip"
+VERFILE="https://raw.githubusercontent.com/JRGTH/nas4free-emby-extension/${BRANCH}/emby/version"
+
+runtime_config()
+{
+	# Get current emby extension version.
+	if [ -f "${CWDIR}/version" ]; then
+		APPVERSION=$(cat ${CWDIR}/version)
+	else
+		APPVERSION="version file not found!"
+	fi
+
+	# Create required directories if missing.
+	if [ ! -d ${CWDIR}/conf ]; then
+		mkdir -p ${CWDIR}/conf
+	fi
+	if [ ! -d ${CWDIR}/log ]; then
+		mkdir -p ${CWDIR}/log
+	fi
+
+	# Set requested emby channel variables.
+	if [ -f "${CWDIR}${EMBYCONF}" ]; then
+		EMBYCHANNEL=$(sysrc -f ${CWDIR}${EMBYCONF} -n EMBY_CHANNEL)
+		if [ "${EMBYCHANNEL}" = "embypass" ]; then
+			embypass_channel
+		elif [ "${EMBYCHANNEL}" = "standard" ]; then
+			standard_channel
+		elif [ -z "${EMBYCHANNEL}" ]; then
+			emby_detect
+		fi
+	else
+		emby_detect
+	fi
+}
+
+emby_detect()
+{
+	# Set the proper channel variables based on the installed emby package and write default configuration.
+	# We have to use this method since embymediaserver --version or equivalent command is broken on FreeBSD.
+	if [ -f "${USRLOCALPATH}/${PRDNAME}/${CMDFILE}" ]; then
+		STANDARD=0
+	else
+		STANDARD=1
+	fi
+	if [ -f "${USRLOCALPATH}/${PRDNAME}-embypass/${CMDFILE}" ]; then
+		EMBYPASS=0
+	else
+		EMBYPASS=1
+	fi
+
+	# Stop script execution if multiple emby versions detected.
+	if [ "${STANDARD}" -eq 0 ] && [ "${EMBYPASS}" -eq 0 ]; then
+		MSG="Error: Multiple ${FULLPRDNAME} versions found."
+		echo ${MSG}
+		logger -t ${SCRIPTNAME} ${MSG}
+		echo "Multiple ${FULLPRDNAME} versions detected, exiting."
+		exit 1
+	elif [ "${STANDARD}" -eq 0 ]; then
+		EMBYCH="standard"
+		default_config
+		standard_channel
+	elif [ "${EMBYPASS}" -eq 0 ]; then
+		EMBYCH="embypass"
+		default_config
+		embypass_channel
+	fi
+}
+
+standard_channel()
+{
+	CMD_ARG=""
+	PKG_ARG=""
+}
+
+embypass_channel()
+{
+	CMD_ARG="_embypass"
+	PKG_ARG="-embypass"
+}
+
+default_config()
+{
+	# Generate default configuration.
+	sysrc -f ${CWDIR}${EMBYCONF} EMBY_CHANNEL=${EMBYCH} EMBY_ENABLE=YES GUI_ENABLE=YES INSTALL_DIR=${CWDIR} >/dev/null 2>&1
+}
+
+config_reset()
+{
+	if [ -f "${CWDIR}${EMBYCONF}" ]; then
+		echo "Removing stale extension config and gui files..."
+		rm -Rf ${CWDIR}/conf
+		rm -f ${WWWPATH}/emby-gui.php
+		rm -Rf ${WWWPATH}/ext/emby-gui
+		rm -f ${USRLOCALPATH}/locale-emby
+		rm -Rf ${EMBYCONFLINK}
+		rm -f ${CWDIR}/version
+		echo "Please run 'embyinit' to restore default configuration."
+		exit 0
+	fi
+}
+
+update_freebsdconf()
+{
+	# Update FreeBSD.conf to fetch latest packages.
+	if [ -f "${PKGCONF}" ]; then 
+		if grep -q "quarterly" ${PKGCONF}; then
+			sed -i '' -E "s/quarterly/latest/g" ${PKGCONF}
+			if [ $? -eq 1 ]; then
+				MSG="Error: A problem has occurred while updating FreeBSD.conf file."
+				echo ${MSG}
+				logger -t ${SCRIPTNAME} ${MSG}
+				exit 1
+			fi
+		fi
+	fi
+}
+
+emby_initial_download()
+{
+	# Update FreeBSD.conf file.
+	update_freebsdconf
+
+	# Check if Emby already exist.
+	if [ ! -f "${EMBYPATH}${PKG_ARG}/${CMDFILE}" ]; then
+		# Fetch and install latest emby package.
+		pkg install -y ${PRDNAME}${PKG_ARG}
+		# Re-check if Emby diretory/application exist.
+		if [ ! -f "${EMBYPATH}${PKG_ARG}/${CMDFILE}" ]; then
+			MSG="Error: A problem has occurred while fetching/locating embymediaserver."
+			echo ${MSG}
+			logger -t ${SCRIPTNAME} ${MSG}
+			exit 1
+		fi
+	fi
+
+	# Backup latest emby rcd after install if embedded.
+	if [ "${PRDPLATFORM}" = "x64-embedded" ]; then
+		if [ -f "${EMBYRCD}${CMD_ARG}" ]; then
+			cp ${EMBYRCD}${CMD_ARG} ${CWDIR}/system/rc.d/
+			if [ $? -eq 1 ]; then
+				MSG="Error: A problem has occurred while copying rcd file."
+				echo ${MSG}
+				logger -t ${SCRIPTNAME} ${MSG}
+				exit 1
+			fi
+		fi
+	fi
+}
+
+pkg_upgrade()
+{
+	# Update FreeBSD.conf file.
+	update_freebsdconf
+
+	# Get current emby version.
+	EMBYVERSION=$(pkg info -I ${PRDNAME}${PKG_ARG} | awk '{print $1}' | cut -d- -f2 | tr -d .)
+
+	# Check for latest emby packages for upgrade.
+	pkg upgrade -y ${PRDNAME}${PKG_ARG}
+
+	# Get new emby version.
+	EMBYNEWVERSION=$(pkg info -I ${PRDNAME}${PKG_ARG} | awk '{print $1}' | cut -d- -f2 | tr -d .)
+
+	# Logging and emby restart after upgrade.
+	if [ "${EMBYNEWVERSION}" -gt "${EMBYVERSION}" ]; then
+		EMBYNEWVER=$(pkg info -I ${PRDNAME}${PKG_ARG} | awk '{print $1}' | cut -d- -f2)
+		echo "${DATE}: ${FULLPRDNAME} upgraded to ${EMBYNEWVER}" >> ${EMBYLOGFILE}
+		echo "${FULLPRDNAME} package upgrade completed!"
+		service ${CMDNAME}${CMD_ARG} onerestart 2> /dev/null || ${EMBYRCD}${CMD_ARG} onerestart
+	fi
+
+	# Backup latest emby rcd after upgrade if embedded.
+	if [ "${PRDPLATFORM}" = "x64-embedded" ]; then
+		if [ -f "${EMBYRCD}${CMD_ARG}" ]; then
+			cp ${EMBYRCD}${CMD_ARG} ${CWDIR}/system/rc.d/
+			if [ $? -eq 1 ]; then
+				MSG="Error: A problem has occurred while copying emby rc file."
+				echo ${MSG}
+				logger -t ${SCRIPTNAME} ${MSG}
+				exit 1
+			fi
+		fi
+	fi
+
+	# Check and upgrade extension package.
+	if [ -f "${CWDIR}/version" ]; then
+		extension_upgrade
+	else
+		ext_initial_download
+	fi
+}
+
+extension_upgrade()
+{
+	# Check if local .zip achive exist then auto-upgrade extension files, otherwise perform online upgrade.
+	echo "Looking for new ${APPNAME} package!"
+	if [ -f "${CWDIR}/*${BRANCH}.zip" ]; then
+		echo "New ${APPNAME} package found, performing upgrade..."
+		mkdir -p ${CWDIR}/update
+		tar -xf ${CWDIR}/*${BRANCH}.zip --exclude='.git*' --strip-components 1 -C ${CWDIR}/update
+		chmod +x ${CWDIR}/update/emby/${SCRIPTNAME}
+		cp -Rf ${CWDIR}/update/emby/* ${CWDIR}/
+		rm -f ${CWDIR}/*${BRANCH}.zip
+		rm -R ${CWDIR}/update
+		update_guifiles
+		# Logging the update event.
+		UPDATEVERSION=$(cat ${CWDIR}/version)
+		echo "${DATE}: ${APPNAME} upgraded to ${UPDATEVERSION}" >> ${EMBYLOGFILE}
+		echo "${APPNAME} package upgrade completed!"
+	else
+		# Perform an online extension upgrade.
+		mkdir -p ${CWDIR}/update
+		fetch -ao ${CWDIR}/update --no-verify-peer --timeout=30 ${VERFILE}
+		if [ $? -eq 1 ]; then
+			MSG="Error: A problem has occurred while fetching version file."
+			echo ${MSG}
+			logger -t ${SCRIPTNAME} ${MSG}
+			exit 1
+		fi
+		# Compare version files and fetch latest package if available.
+		if [ -f "${CWDIR}/update/version" ]; then
+			UPDATEVER=$(cat ${CWDIR}/update/version | tr -d .)
+			CURRENTVER=$(cat ${CWDIR}/version | tr -d .)
+			if [ "${UPDATEVER}" -gt "${CURRENTVER}" ]; then
+				echo "New ${APPNAME} package found, performing upgrade..."
+				fetch -ao ${CWDIR}/update --no-verify-peer --timeout=30 ${GITURL}
+				if [ $? -eq 1 ]; then
+					MSG="Error: A problem has occurred while fetching extension package."
+					echo ${MSG}
+					logger -t ${SCRIPTNAME} ${MSG}
+					exit 1
+				fi
+				tar -xf ${CWDIR}/update/*${BRANCH}.zip --exclude='.git*' --strip-components 1 -C ${CWDIR}/update
+				chmod +x ${CWDIR}/update/emby/${SCRIPTNAME}
+				cp -Rf ${CWDIR}/update/emby/* ${CWDIR}/
+				rm -R ${CWDIR}/update
+				update_guifiles
+				# Logging the update event.
+				UPDATEVERSION=$(cat ${CWDIR}/version)
+				echo "${DATE}: ${APPNAME} upgraded to ${UPDATEVERSION}" >> ${EMBYLOGFILE}
+				echo "${APPNAME} package upgrade completed!"
+			else
+				echo "${APPNAME} is on the latest version!"
+				rm -R ${CWDIR}/update
+			fi
+		fi
+	fi
+}
+
+ext_initial_download()
+{
+	# Always ensure the version file is present, otherwise update the extension files on startup.
+	if [ ! -f "${CWDIR}/version" ]; then
+		mkdir -p ${CWDIR}/update
+		fetch -ao ${CWDIR}/update --no-verify-peer --timeout=30 ${GITURL}
+		if [ $? -eq 1 ]; then
+			MSG="Error: A problem has occurred while fetching extension package."
+			echo ${MSG}
+			logger -t ${SCRIPTNAME} ${MSG}
+			exit 1
+		fi
+		tar -xf ${CWDIR}/update/${BRANCH}.zip --exclude='.git*' --strip-components 1 -C ${CWDIR}/update
+		chmod +x ${CWDIR}/update/emby/${SCRIPTNAME}
+		cp -Rf ${CWDIR}/update/emby/* ${CWDIR}/
+		rm -R ${CWDIR}/update
+	fi
+}
+
+update_guifiles()
+{
+	# Check if gui enabled then copy/overwrite new files to www.
+	GUI_STATUS=$(sysrc -f ${CWDIR}${EMBYCONF} -qn GUI_ENABLE)
+	if [ "${GUI_STATUS}" = "YES" ]; then
+		cp -R ${CWDIR}/gui/* ${WWWPATH}/
+		if [ $? -eq 1 ]; then
+			MSG="Error: A problem has occurred while copying extension gui files."
+			echo ${MSG}
+			logger -t ${SCRIPTNAME} ${MSG}
+			exit 1
+		fi
+	fi
+}
+
+product_check()
+{
+	# Check for the working product.
+	if [ "${PRODUCT}" = "NAS4FREE-x64" ] || [ "${PRODUCT}" = "XIGMANAS-x64" ]; then
+		postinit_cmd
+		gui_start
+	fi
+}
+
+platform_check()
+{
+	# Check for working platform.
+	if [ "${PRDPLATFORM}" = "x64-embedded" ]; then
+		pkg_symlinkdir
+		compat_symlinkdir
+		emby_symlinkdir
+		emby_rcd_link
+	fi
+}
+
+postinit_cmd()
+{
+	# Check and generate temporary php script for postinit command.
+	if ! grep -qw ${CWDIR}/${SCRIPTNAME} ${CONFIG}; then
+		touch ${CWDIR}/postinit
+		if [ $? -eq 1 ]; then
+			MSG="Error: A problem has occurred while creating the postinit file."
+			echo ${MSG}
+			logger -t ${SCRIPTNAME} ${MSG}
+			exit 1
+		fi
+		chmod +x ${CWDIR}/postinit
+		if [ ! "${PRDVERSION}" -ge "110" ]; then
+			# Generate php script for NAS4Free 10.3 versions.
+			cat << EOF > ${CWDIR}/postinit
+<?php
+require_once("config.inc");
+require_once("functions.inc");
+\$cmd = dirname(__FILE__)."/${SCRIPTNAME}";
+	\$i =0;
+	if ( is_array(\$config['rc']['postinit'] ) && is_array( \$config['rc']['postinit']['cmd'] ) ) {
+		for (\$i; \$i < count(\$config['rc']['postinit']['cmd']);) {
+			if (preg_match('/${SCRIPTNAME}/', \$config['rc']['postinit']['cmd'][\$i])) break; ++\$i; }
+	}
+	\$config['rc']['postinit']['cmd'][\$i] = \$config['cmd']."\$cmd";
+	write_config();
+?>
+EOF
+		else
+			# Generate php script for NAS4Free/XigmaNAS 11.x versions.
+			cat << EOF > ${CWDIR}/postinit
+<?php
+require_once("config.inc");
+require_once("functions.inc");
+\$cmd = dirname(__FILE__)."/${SCRIPTNAME}";
+\$name = "Emby Extension";
+\$comment = "Start ${FULLPRDNAME}";
+\$rc = &array_make_branch(\$config,'rc','param'); 
+if(false === array_search_ex(\$name,\$rc,'name')):
+	\$rc_param = [];
+	\$rc_param['uuid'] = uuid();
+	\$rc_param['name'] = \$name;
+	\$rc_param['value'] = \$cmd;
+	\$rc_param['comment'] = \$comment;
+	\$rc_param['typeid'] = '2';
+	\$rc_param['enable'] = true;
+	\$rc[] = \$rc_param;
+	write_config();
+endif;
+unset(\$rc);
+?>
+EOF
+		fi
+
+		# Set standard emby pkg for informational purposes.
+		if [ -z "${PKG_ARG}" ]; then
+			EMBY_CHANNEL="standard"
+		fi
+
+		# Execute temporary php script.
+		if [ "${OBI_INSTALL}" != "ON" ]; then
+			php-cgi -f ${CWDIR}/postinit && rm ${CWDIR}/postinit
+		fi
+		# To set enable for the gui because at the installation Emby is started by default.
+		sysrc -f ${CWDIR}${EMBYCONF} EMBY_ENABLE=YES GUI_ENABLE=YES INSTALL_DIR=${CWDIR} >/dev/null 2>&1
+	fi
+}
+
+gui_start()
+{
+	# Initialize the extension gui.
+	if [ -d "${CWDIR}/gui" ]; then
+		# Always ensure the config directory/file exist.
+		if [ ! -f "${CWDIR}${EMBYCONF}" ]; then
+			# Try to restore default configuration.
+			runtime_config
+		fi
+		GUI_STATUS=$(sysrc -f ${CWDIR}${EMBYCONF} -qn GUI_ENABLE)
+		if [ "${GUI_STATUS}" = "YES" ]; then
+			# Store the installation path and link conf.
+			if ! sysrc -f ${CWDIR}${EMBYCONF} -n INSTALL_DIR | grep -q "${CWDIR}"; then
+				sysrc -f ${CWDIR}${EMBYCONF} INSTALL_DIR=${CWDIR} >/dev/null 2>&1
+			fi
+			mkdir -p ${EMBYCONFLINK}
+			ln -Ffhs ${CWDIR}/conf ${EMBYCONFLINK}/conf
+			# Copy the gui files.
+			cp -R ${CWDIR}/gui/* ${WWWPATH}/
+			if [ $? -eq 1 ]; then
+				MSG="Error: A problem has occurred while copying extension gui files."
+				echo ${MSG}
+				logger -t ${SCRIPTNAME} ${MSG}
+				exit 1
+			fi
+		fi
+	fi
+}
+
+gui_enable()
+{
+	#  Relink conf and copy the gui files.
+	if [ -d "${CWDIR}/gui" ]; then
+		mkdir -p ${EMBYCONFLINK}
+		ln -Ffhs ${CWDIR}/conf ${EMBYCONFLINK}/conf
+		sysrc -f ${CWDIR}${EMBYCONF} GUI_ENABLE=YES >/dev/null 2>&1
+		cp -R ${CWDIR}/gui/* ${WWWPATH}/
+		if [ $? -eq 1 ]; then
+			MSG="Error: A problem has occurred while copying extension gui files."
+			echo ${MSG}
+			logger -t ${SCRIPTNAME} ${MSG}
+			exit 1
+		else
+			exit 0
+		fi
+	else
+		MSG="Error: Extension gui files not found."
+		echo ${MSG}
+		logger -t ${SCRIPTNAME} ${MSG}
+		exit 1
+	fi
+}
+
+gui_disable()
+{
+	# Disable gui if -t option specified.
+	if [ -d "${CWDIR}/gui" ]; then
+		rm -f ${WWWPATH}/emby-gui.php
+		rm -Rf ${WWWPATH}/ext/emby-gui
+		rm -f ${USRLOCALPATH}/locale-emby
+		rm -Rf ${EMBYCONFLINK}
+		sysrc -f ${CWDIR}${EMBYCONF} GUI_ENABLE=NO >/dev/null 2>&1
+		if [ $? -eq 1 ]; then
+			MSG="Error: A problem while removing extension gui files."
+			echo ${MSG}
+			logger -t ${SCRIPTNAME} ${MSG}
+			exit 1
+		else
+			exit 0
+		fi
+	else
+		MSG="Error: Extension gui files not found."
+		echo ${MSG}
+		logger -t ${SCRIPTNAME} ${MSG}
+		exit 1
+	fi
+
+	# Remove empty ext folder to prevent empty "Extensions" tab.
+	if [ -d "${WWWPATH}/ext" ]; then
+		if [ ! "$(ls -A ${WWWPATH}/ext)" ]; then
+			rm -R ${WWWPATH}/ext
+		fi
+	fi
+}
+
+emby_usergroup()
+{
+	# Check and create emby user/group.
+	if ! pw groupshow emby >/dev/null 2>&1; then
+		pw groupadd emby -g 972 >/dev/null 2>&1
+	fi
+	if ! pw usershow emby >/dev/null 2>&1; then
+		pw useradd emby -u 972 -g 972  -c "${FULLPRDNAME}" -d /nonexistent -s /usr/sbin/nologin >/dev/null 2>&1
+	fi
+}
+
+pkg_symlinkdir()
+{
+	# Check and create/relink required symlinks/dirs for package cache and db.
+	# This may be already performed by any prevously installed Extension,
+	# supporting this aproach, in that case will reuse the existing environment.
+	if [ -d "${PKGCACHE}" ]; then
+		if [ ! -L "${PKGCACHE}" ]; then
+			rm -R ${PKGCACHE}
+			mkdir -p ${CWDIR}/system/pkg/cache
+			ln -Ffhs ${CWDIR}/system/pkg/cache ${PKGCACHE}
+		fi
+	else
+		mkdir -m 0755 -p /var/cache
+		mkdir -p ${CWDIR}/system/pkg/cache
+		ln -Ffhs ${CWDIR}/system/pkg/cache ${PKGCACHE}
+	fi
+	if [ -d "${PKGDB}" ]; then
+		if [ ! -L "${PKGDB}" ]; then
+			rm -R ${PKGDB}
+			mkdir -p ${CWDIR}/system/pkg/db
+			ln -Ffhs ${CWDIR}/system/pkg/db ${PKGDB}
+		fi
+	else
+		mkdir -p ${CWDIR}/system/pkg/db
+		ln -Ffhs ${CWDIR}/system/pkg/db ${PKGDB}
+	fi
+}
+
+compat_symlinkdir()
+{
+	# Check and create/relink required symlinks/dirs for compat libs.
+	if [ ! -d "${COMPATPATH1}" ]; then
+		mkdir -m 0755 -p /usr/local/lib
+		mkdir -p ${CWDIR}/system/compat/lib/compat
+		ln -Ffhs ${CWDIR}/system/compat/lib/compat ${COMPATPATH1}
+	fi
+	if [ ! -d "${COMPATPATH2}" ]; then
+		mkdir -m 0755 -p /usr/local/lib32
+		mkdir -p ${CWDIR}/system/compat/lib32/compat
+		ln -Ffhs ${CWDIR}/system/compat/lib32/compat ${COMPATPATH2}
+	fi
+	if [ ! -d "${COMPATPATH3}" ]; then
+		mkdir -m 0755 -p /usr/local/libdata
+		mkdir -p ${CWDIR}/system/compat/libdata/ldconfig
+		ln -Ffhs ${CWDIR}/system/compat/libdata/ldconfig ${COMPATPATH3}
+	fi
+	if [ ! -d "${COMPATPATH4}" ]; then
+		mkdir -m 0755 -p /usr/local/libdata
+		mkdir -p ${CWDIR}/system/compat/libdata/ldconfig32
+		ln -Ffhs ${CWDIR}/system/compat/libdata/ldconfig32 ${COMPATPATH4}
+	fi
+}
+
+emby_symlinkdir()
+{
+	# Check and create/relink required symlinks/dirs for embymediaserver.
+	if [ ! -d "${RCDPATH}" ]; then
+		mkdir -m 0755 -p ${RCDPATH}
+	fi
+	if [ -d "${CWDIR}/${PRDNAME}${PKG_ARG}" ]; then
+		mv ${CWDIR}/${PRDNAME}${PKG_ARG} ${CWDIR}/system/${PRDNAME}${PKG_ARG}
+	fi
+	if [ ! -d "${EMBYPATH}${PKG_ARG}" ]; then
+		mkdir -p ${CWDIR}/system/${PRDNAME}${PKG_ARG}
+		ln -Ffhs ${CWDIR}/system/${PRDNAME}${PKG_ARG} ${USRLOCALPATH}/${PRDNAME}${PKG_ARG}
+	fi
+	if [ ! -d "${CWDIR}/system/rc.d" ]; then
+		mkdir -p ${CWDIR}/system/rc.d
+	fi
+}
+
+emby_rcd_link()
+{
+	# Restore current emby rcd if embedded.
+	if [ "${PRDPLATFORM}" = "x64-embedded" ]; then
+		if [ -f ${CWDIR}/system/rc.d/${CMDNAME}${CMD_ARG} ]; then
+			cp ${CWDIR}/system/rc.d/${CMDNAME}${CMD_ARG} ${RCDPATH}/
+			if [ $? -eq 1 ]; then
+				MSG="Error: A problem has occurred while copying rcd file."
+				echo ${MSG}
+				logger -t ${SCRIPTNAME} ${MSG}
+				exit 1
+			fi
+		fi
+	fi
+}
+
+ext_enable_disable()
+{
+	# Start emby extension gui if enabled otherwise start emby cli version.
+	if [ -d "${CWDIR}/gui" ]; then
+		GUI_STATUS=$(sysrc -f ${CWDIR}${EMBYCONF} -qn GUI_ENABLE)
+		if [ "${GUI_STATUS}" = "YES" ]; then
+			EMBY_STATUS=$(sysrc -f ${CWDIR}${EMBYCONF} -qn EMBY_ENABLE)
+			if [ "${EMBY_STATUS}" = "NO" ]; then
+				exit
+			fi
+		else
+			break
+		fi
+	fi
+}
+
+emby_rcparam_start()
+{
+	# Emby Media Server rc parameters.
+	if ! sysrc -f ${RCCONF} -n ${CMDNAME}${CMD_ARG}_enable | grep -q "NO"; then
+		sysrc ${CMDNAME}${CMD_ARG}_enable="NO" >/dev/null 2>&1
+	fi
+	if ! sysrc -f ${RCCONF} -n ${CMDNAME}${CMD_ARG}_support_path | grep -q "${SUPPORTPATH}"; then
+		sysrc ${CMDNAME}${CMD_ARG}_support_path="${SUPPORTPATH}" >/dev/null 2>&1
+	fi
+	if ! sysrc -f ${RCCONF} -n ${CMDNAME}${CMD_ARG}_maxplugins | grep -q "6"; then
+		sysrc ${CMDNAME}${CMD_ARG}_maxplugins="6" >/dev/null 2>&1
+	fi
+
+	# Start Emby Media Server.
+	if ! ps -acx | grep -q "Emby \Media \Server"; then
+		service ${CMDNAME}${CMD_ARG} onestart 2> /dev/null || ${EMBYRCD}${CMD_ARG} onestart
+	fi
+
+	# Logg on startup success, else logging with faults.
+	if [ $? -eq 0 ]; then
+		MSG="script has been started successfully!"
+		logger -t ${SCRIPTNAME} ${MSG}
+	else
+		MSG="script started with faults"
+		logger -t ${SCRIPTNAME} ${MSG}
+	fi
+}
+
+emby_init()
+{
+	echo "Initializing..."
+	# Check for system compatibility.
+	if [ ! "${PLATFORM}" = "amd64" ]; then
+		echo "Unsupported platform!"; exit 1
+	fi 
+	# Check for product compatibility.
+	if [ ! "${PRDVERSION}" -ge "103" ]; then
+		echo "Unsupported version!"; exit 1
+	fi
+
+	# Link embyinit to /usr/local/sbin.
+	if [ ! -f "/usr/local/sbin/${SCRIPTNAME}" ]; then
+		ln -fs ${CWDIR}/${SCRIPTNAME} /usr/local/sbin/
+	fi
+
+	# Function calls.
+	platform_check
+	ext_initial_download
+	emby_initial_download
+	emby_usergroup
+	product_check
+	ext_enable_disable
+	emby_rcparam_start
+}
+
+# Run-time configuration.
+runtime_config
+
+# Embyinit common control switches.
+while getopts ":abotgsprxvuh" option; do
+	case ${option} in
+		[h]) echo "Usage: ${SCRIPTNAME} -[option]";
+		echo "Options:"
+		echo "		-s  Start ${FULLPRDNAME}."
+		echo "		-p  Stop ${FULLPRDNAME}."
+		echo "		-r  Restart ${FULLPRDNAME}."
+		echo "		-u  Upgrade Emby/Extension packages."
+		echo "		-g  Enables the addon GUI."
+		echo "		-t  Disable the addon GUI."
+		echo "		-x  Reset Emby Extension Config."
+		echo "		-v  Display product version."
+		echo "		-h  Display this help message."; exit 0 ;;
+		[a]) OPT_INSTALL="1";; # Alternate installer option.
+		[o]) OBI_INSTALL="ON";; # To prevent nested PHP-CGI call for installation with OBI.
+		[g]) gui_enable; exit 0 ;; # For enable the addon gui.
+		[t]) gui_disable; exit 0 ;; # For disable the addon gui.
+		[s]) service ${CMDNAME}${CMD_ARG} onestart 2> /dev/null || ${EMBYRCD}${CMD_ARG} onestart; exit 0 ;;
+		[p]) service ${CMDNAME}${CMD_ARG} onestop 2> /dev/null || ${EMBYRCD}${CMD_ARG} onestop; exit 0 ;;
+		[r]) service ${CMDNAME}${CMD_ARG} onerestart 2> /dev/null || ${EMBYRCD}${CMD_ARG} onerestart; exit 0 ;;
+		[x]) config_reset;;
+		[v]) echo "${APPNAME} ${APPVERSION}"; pkg info -I ${PRDNAME}${PKG_ARG}; exit 0 ;;
+		[u]) pkg_upgrade; exit 0 ;;
+		[?]) echo "Invalid option, -h for usage."; exit 1 ;;
+	esac
+done
+
+# Set the requested emby channel during initial install.
+if [ "${OPT_INSTALL}" = 1 ]; then
+	if [ ! -d ${CWDIR}/conf ]; then
+		mkdir -p ${CWDIR}/conf
+	fi
+	sysrc -f ${CWDIR}${EMBYCONF} EMBY_CHANNEL=embypass >/dev/null 2>&1
+	embypass_channel
+fi
+
+emby_init
